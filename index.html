@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Roblox Base — Mission: Collect the Cores</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Trebuchet MS', system-ui, sans-serif;
+    background: linear-gradient(160deg,#1b1e2b,#2a2f45);
+    color:#fff; height:100vh; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; overflow:hidden;
+  }
+  h1 { font-size:1.4rem; letter-spacing:1px; margin-bottom:8px; }
+  #hud {
+    display:flex; gap:24px; font-size:.95rem; margin-bottom:10px;
+    background:rgba(0,0,0,.35); padding:8px 20px; border-radius:20px;
+  }
+  #hud b { color:#ffd447; }
+  #stage {
+    position:relative; width:760px; height:420px;
+    background:linear-gradient(180deg,#7cc7ff,#bfe6ff 60%,#8ee08e 60%,#5cc45c);
+    border:4px solid #10131f; border-radius:12px; overflow:hidden;
+    box-shadow:0 20px 40px rgba(0,0,0,.45);
+  }
+  canvas { display:block; }
+  #overlay {
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px;
+    background:rgba(10,12,20,.82); text-align:center; padding:24px;
+  }
+  #overlay.hidden { display:none; }
+  #overlay h2 { font-size:1.6rem; color:#ffd447; }
+  #overlay p { max-width:420px; line-height:1.5; font-size:.95rem; }
+  button {
+    background:#ff4d4d; color:#fff; border:none; padding:12px 30px;
+    font-size:1rem; font-weight:bold; border-radius:8px; cursor:pointer;
+    box-shadow:0 5px 0 #b32e2e; transition:transform .08s;
+  }
+  button:active { transform:translateY(3px); box-shadow:0 2px 0 #b32e2e; }
+  #controls { margin-top:12px; font-size:.8rem; opacity:.7; }
+  #toast {
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    background:rgba(0,0,0,.7); padding:6px 16px; border-radius:14px;
+    font-size:.85rem; opacity:0; transition:opacity .25s; pointer-events:none;
+  }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+
+<h1>ROBLOX BASE — Mission: Collect the Cores</h1>
+
+<div id="hud">
+  <span>Lives: <b id="lives">3</b></span>
+  <span>Cores: <b id="cores">0</b> / 4</span>
+  <span>Time: <b id="timer">0.0</b>s</span>
+</div>
+
+<div id="stage">
+  <canvas id="game" width="760" height="420"></canvas>
+  <div id="toast"></div>
+  <div id="overlay">
+    <h2>Mission Brief</h2>
+    <p>Collect all <b>4 cores</b> scattered across the base and reach the green exit pad.
+       Dodge the red lava and don't fall off. You get 3 lives.</p>
+    <p style="font-size:.85rem;opacity:.8">Move: ← → or A / D &nbsp;•&nbsp; Jump: ↑, W or Space</p>
+    <button id="startBtn">Start Mission</button>
+  </div>
+</div>
+
+<div id="controls">Tip: land on the yellow platforms — they're the only safe ground.</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const GRAVITY = 0.62, JUMP = -11.4, SPEED = 4.4, FRICTION = 0.82;
+const TOTAL_CORES = 4;
+
+let keys = {}, player, platforms = [], cores = [], hazards = [], exitPad;
+let lives, collected, running = false, won = false, lost = false;
+let startTime = 0, elapsed = 0, camX = 0;
+
+const WORLD_W = 1700;                 // level is wider than the view
+const toastEl = document.getElementById('toast');
+const overlay = document.getElementById('overlay');
+const livesEl = document.getElementById('lives');
+const coresEl = document.getElementById('cores');
+const timerEl = document.getElementById('timer');
+
+function buildLevel() {
+  // x, y, w, h  — y is top of platform
+  platforms = [
+    { x: 0,    y: 360, w: 260, h: 60 },   // start ground
+    { x: 330,  y: 320, w: 120, h: 20 },
+    { x: 520,  y: 270, w: 110, h: 20 },
+    { x: 700,  y: 230, w: 130, h: 20 },
+    { x: 900,  y: 300, w: 150, h: 20 },
+    { x: 1130, y: 250, w: 120, h: 20 },
+    { x: 1330, y: 330, w: 370, h: 90 },   // exit ground
+  ];
+
+  hazards = [
+    { x: 400, y: 300, w: 220, h: 16 },    // lava strip
+    { x: 860, y: 380, w: 220, h: 40 },    // lava pit
+  ];
+
+  cores = [
+    { x: 375,  y: 280, r: 11, got: false },
+    { x: 560,  y: 230, r: 11, got: false },
+    { x: 940,  y: 260, r: 11, got: false },
+    { x: 1175, y: 210, r: 11, got: false },
+  ];
+
+  exitPad = { x: 1560, y: 300, w: 90, h: 30 };
+
+  player = { x: 60, y: 300, w: 26, h: 34, vx: 0, vy: 0, onGround: false };
+  lives = 3; collected = 0; camX = 0;
+  won = false; lost = false;
+}
+
+function resetPlayer() {
+  player.x = 60; player.y = 300; player.vx = 0; player.vy = 0;
+}
+
+function showToast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => toastEl.classList.remove('show'), 1200);
+}
+
+function updateHUD() {
+  livesEl.textContent = lives;
+  coresEl.textContent = collected;
+  timerEl.textContent = elapsed.toFixed(1);
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function update() {
+  // horizontal
+  if (keys['ArrowLeft'] || keys['a'])  player.vx -= SPEED * 0.35;
+  if (keys['ArrowRight']|| keys['d'])  player.vx += SPEED * 0.35;
+  player.vx *= FRICTION;
+  player.vx = Math.max(-SPEED, Math.min(SPEED, player.vx));
+  player.x += player.vx;
+
+  // vertical
+  if ((keys['ArrowUp'] || keys['w'] || keys[' ']) && player.onGround) {
+    player.vy = JUMP; player.onGround = false;
+  }
+  player.vy += GRAVITY;
+  player.y += player.vy;
+
+  // world bounds
+  if (player.x < 0) { player.x = 0; player.vx = 0; }
+  if (player.x + player.w > WORLD_W) { player.x = WORLD_W - player.w; player.vx = 0; }
+
+  // platform collisions
+  player.onGround = false;
+  for (const p of platforms) {
+    if (!rectsOverlap(player, p)) continue;
+    const prevBottom = player.y + player.h - player.vy;
+    if (player.vy >= 0 && prevBottom <= p.y + 8) {
+      player.y = p.y - player.h;
+      player.vy = 0;
+      player.onGround = true;
+    } else if (player.vy < 0 && player.y - player.vy >= p.y + p.h - 8) {
+      player.y = p.y + p.h;
+      player.vy = 0;
+    }
+  }
+
+  // hazards
+  for (const h of hazards) {
+    if (rectsOverlap(player, h)) { damage(); return; }
+  }
+
+  // fell out of the world
+  if (player.y > H + 120) { damage(); return; }
+
+  // cores
+  for (const c of cores) {
+    if (c.got) continue;
+    const cx = c.x, cy = c.y;
+    const px = player.x + player.w / 2, py = player.y + player.h / 2;
+    if (Math.hypot(cx - px, cy - py) < c.r + 16) {
+      c.got = true; collected++;
+      updateHUD();
+      showToast(collected === TOTAL_CORES
+        ? 'All cores collected — reach the exit pad!'
+        : `Core ${collected}/${TOTAL_CORES} collected`);
+    }
+  }
+
+  // exit pad
+  if (collected === TOTAL_CORES && rectsOverlap(player, exitPad)) win();
+
+  // camera
+  const target = Math.max(0, Math.min(WORLD_W - W, player.x - W / 2));
+  camX += (target - camX) * 0.12;
+}
+
+function damage() {
+  lives--;
+  updateHUD();
+  if (lives <= 0) { lose(); return; }
+  showToast('Ouch! ' + lives + ' lives left');
+  resetPlayer();
+  player.vy = 0;
+}
+
+function win() {
+  running = false; won = true;
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h2>Mission Complete!</h2>
+    <p>You collected all ${TOTAL_CORES} cores in <b>${elapsed.toFixed(1)}s</b>
+       with <b>${lives}</b> ${lives === 1 ? 'life' : 'lives'} remaining.</p>
+    <button id="againBtn">Play Again</button>`;
+  document.getElementById('againBtn').onclick = restart;
+}
+
+function lose() {
+  running = false; lost = true;
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <h2>Mission Failed</h2>
+    <p>You ran out of lives. Cores collected: <b>${collected}/${TOTAL_CORES}</b>.</p>
+    <button id="againBtn">Try Again</button>`;
+  document.getElementById('againBtn').onclick = restart;
+}
+
+function restart() {
+  overlay.classList.add('hidden');
+  overlay.innerHTML = '';
+  buildLevel();
+  updateHUD();
+  startTime = performance.now();
+  running = true;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(-camX, 0);
+
+  // platforms
+  for (const p of platforms) {
+    ctx.fillStyle = '#e8c34a';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = 'rgba(0,0,0,.18)';
+    ctx.fillRect(p.x, p.y + p.h - 6, p.w, 6);
+    ctx.strokeStyle = '#8a6d14';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(p.x, p.y, p.w, p.h);
+  }
+
+  // hazards (lava)
+  for (const h of hazards) {
+    const g = ctx.createLinearGradient(0, h.y, 0, h.y + h.h);
+    g.addColorStop(0, '#ff9d2e');
+    g.addColorStop(1, '#c81e1e');
+    ctx.fillStyle = g;
+    ctx.fillRect(h.x, h.y, h.w, h.h);
+  }
+
+  // exit pad
+  const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ctx.globalAlpha = collected === TOTAL_CORES ? pulse : 0.4;
+  ctx.fillStyle = '#3ddc84';
+  ctx.fillRect(exitPad.x, exitPad.y, exitPad.w, exitPad.h);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = '#1d7a48';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(exitPad.x, exitPad.y, exitPad.w, exitPad.h);
+  ctx.fillStyle = '#0b3d24';
+  ctx.font = 'bold 13px Trebuchet MS';
+  ctx.textAlign = 'center';
+  ctx.fillText('EXIT', exitPad.x + exitPad.w / 2, exitPad.y + 20);
+
+  // cores
+  for (const c of cores) {
+    if (c.got) continue;
+    const bob = Math.sin(performance.now() / 400 + c.x) * 4;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y + bob, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#38b6ff';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+
+  // player
+  ctx.fillStyle = '#ff4d4d';
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(player.x + 5, player.y + 8, 5, 5);
+  ctx.fillRect(player.x + 16, player.y + 8, 5, 5);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(player.x + 6, player.y + 9, 3, 3);
+  ctx.fillRect(player.x + 17, player.y + 9, 3, 3);
+
+  ctx.restore();
+
+  // out-of-view arrow to the exit
+  if (collected === TOTAL_CORES) {
+    const exitScreenX = exitPad.x - camX;
+    if (exitScreenX > W - 40 || exitScreenX < 0) {
+      ctx.fillStyle = '#3ddc84';
+      ctx.font = 'bold 22px Trebuchet MS';
+      ctx.textAlign = 'center';
+      ctx.fillText('→', W - 24, H / 2);
+    }
+  }
+}
+
+function loop(now) {
+  if (running) {
+    elapsed = (now - startTime) / 1000;
+    updateHUD();
+    update();
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// input
+addEventListener('keydown', e => {
+  keys[e.key] = true;
+  keys[e.key.toLowerCase()] = true;
+  if ([' ','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+});
+addEventListener('keyup', e => {
+  keys[e.key] = false;
+  keys[e.key.toLowerCase()] = false;
+});
+
+document.getElementById('startBtn').onclick = restart;
+document.getElementById('againBtn')?.addEventListener('click', restart);
+
+buildLevel();
+updateHUD();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
